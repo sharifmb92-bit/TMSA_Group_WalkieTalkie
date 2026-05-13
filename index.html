@@ -1,0 +1,351 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <title>BusTalk Menorca</title>
+    
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script defer src="https://unpkg.com/alpinejs@3.x.x/dist/cdn.min.js"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+    
+    <!-- FIREBASE -->
+    <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-auth-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore-compat.js"></script>
+
+    <style>
+        [x-cloak] { display: none !important; }
+        
+        /* Prevenir zoom y menús raros al mantener pulsado el Walkie Talkie */
+        body { 
+            background-color: #1a1a1a; 
+            user-select: none; 
+            -webkit-user-select: none; 
+            -webkit-touch-callout: none;
+            padding-top: env(safe-area-inset-top);
+        }
+
+        .bg-gray-custom { background-color: #262626; }
+        
+        .ptt-active { 
+            background-color: #ef4444 !important; /* Rojo al grabar */
+            transform: scale(0.92); 
+            box-shadow: 0 0 30px rgba(239, 68, 68, 0.8);
+        }
+
+        .ptt-receiving {
+            background-color: #10b981 !important; /* Verde al recibir audio */
+            box-shadow: 0 0 30px rgba(16, 185, 129, 0.8);
+            animation: pulse-green 1s infinite;
+        }
+
+        @keyframes pulse-green {
+            0%, 100% { transform: scale(1); }
+            50% { transform: scale(1.05); }
+        }
+
+        .hide-scrollbar::-webkit-scrollbar { display: none; }
+    </style>
+</head>
+<body x-data="busTalkApp()" x-init="init()" class="text-white font-sans h-screen flex flex-col overflow-hidden">
+
+    <!-- PANTALLA DE INICIO (Login) -->
+    <div x-show="!sesionIniciada" x-transition.opacity class="fixed inset-0 bg-black z-50 flex flex-col items-center justify-center p-6 backdrop-blur-md">
+        <div class="bg-gray-900 p-8 rounded-[2rem] w-full max-w-sm text-center shadow-2xl border border-gray-800">
+            <div class="text-yellow-500 text-6xl mb-6"><i class="fas fa-bus"></i></div>
+            <h2 class="text-2xl font-black mb-2 text-white uppercase tracking-wider">Identificación</h2>
+            <p class="text-gray-400 mb-8 text-sm">Introduce el número de tu autobús para entrar en la radio de Menorca.</p>
+            
+            <input type="number" x-model="miBusInput" placeholder="Nº de Bus" 
+                   class="w-full p-5 mb-6 rounded-2xl bg-gray-800 text-white text-center text-3xl font-black border-2 border-gray-700 focus:border-yellow-500 outline-none transition-colors">
+            
+            <button @click="iniciarTurno()" class="w-full bg-yellow-500 active:bg-yellow-600 text-black font-black text-lg py-5 rounded-2xl transition-transform active:scale-95 shadow-[0_0_20px_rgba(234,179,8,0.3)]">
+                EMPEZAR TURNO
+            </button>
+        </div>
+    </div>
+
+    <!-- CABECERA -->
+    <header class="p-5 bg-black flex justify-between items-center border-b border-gray-800 z-10">
+        <div class="flex items-center space-x-3">
+            <span class="bg-yellow-500 text-black font-black px-4 py-1.5 rounded-lg text-lg" x-text="'BUS ' + miBus"></span>
+            <h1 class="text-xl font-black tracking-tighter italic text-gray-300">Bus<span class="text-yellow-500">Talk</span></h1>
+        </div>
+        <div class="flex items-center space-x-3">
+            <div class="flex items-center gap-1.5 bg-gray-900 px-3 py-1.5 rounded-full border border-gray-800">
+                <span class="w-2.5 h-2.5 rounded-full" :class="conectado ? 'bg-green-500 animate-pulse' : 'bg-red-500'"></span>
+                <span class="text-[10px] font-bold tracking-widest uppercase" x-text="conectado ? 'Online' : 'Offline'"></span>
+            </div>
+            <button @click="cerrarTurno()" class="w-10 h-10 bg-gray-900 rounded-full flex items-center justify-center text-gray-400 active:text-red-500 transition-colors">
+                <i class="fas fa-power-off"></i>
+            </button>
+        </div>
+    </header>
+
+    <!-- LISTA DE COMPAÑEROS (Radar en tiempo real) -->
+    <main class="flex-1 overflow-y-auto p-4 space-y-3 bg-[#121212] hide-scrollbar pb-6">
+        <div class="flex justify-between items-end mb-4 px-2">
+            <p class="text-[10px] font-black text-gray-500 uppercase tracking-[0.2em]">Compañeros en ruta</p>
+            <p class="text-[10px] text-gray-600 font-bold" x-text="compañeros.length + ' activos'"></p>
+        </div>
+        
+        <template x-if="compañeros.length === 0 && sesionIniciada">
+            <div class="text-center py-10 opacity-30">
+                <i class="fas fa-route text-6xl mb-4"></i>
+                <p class="font-bold text-sm uppercase tracking-widest">Nadie más en ruta</p>
+            </div>
+        </template>
+
+        <template x-for="comp in compañeros" :key="comp.id">
+            <div class="bg-gray-800 p-5 rounded-2xl border-l-4 flex justify-between items-center shadow-lg"
+                 :class="comp.id === elQueHabla ? 'border-green-500 bg-green-900/20' : 'border-blue-500'">
+                <div>
+                    <div class="flex items-center gap-2 mb-1">
+                        <p class="font-black text-lg text-white" x-text="'Bus ' + comp.id"></p>
+                        <!-- Animación si este bus está hablando ahora mismo -->
+                        <i x-show="comp.id === elQueHabla" class="fas fa-volume-up text-green-400 animate-pulse"></i>
+                    </div>
+                    <p class="text-xs text-blue-400 font-bold uppercase tracking-wider flex items-center gap-1">
+                        <i class="fas fa-map-marker-alt"></i> <span x-text="comp.ubicacion"></span>
+                    </p>
+                </div>
+                <div class="text-right bg-gray-900 px-4 py-2 rounded-xl border border-gray-700">
+                    <p class="text-[9px] uppercase tracking-widest text-gray-500 font-bold mb-0.5">Pasajeros</p>
+                    <span class="text-2xl font-black text-yellow-500" x-text="comp.pax"></span>
+                </div>
+            </div>
+        </template>
+    </main>
+
+    <!-- PANEL DE CONTROL DEL CONDUCTOR -->
+    <footer class="p-6 bg-black rounded-t-[2.5rem] shadow-[0_-10px_40px_rgba(0,0,0,0.5)] border-t border-gray-800 relative z-20">
+        <div class="flex flex-col items-center max-w-md mx-auto">
+            
+            <!-- UBICACIÓN RÁPIDA -->
+            <div class="w-full flex justify-between gap-2 mb-6">
+                <button @click="actualizarUbicacion('Ciu')" class="flex-1 bg-gray-800 py-3 rounded-xl text-xs font-bold uppercase border border-gray-700 active:bg-blue-600 transition-colors" :class="miUbicacion === 'Ciu' ? 'bg-blue-600 text-white' : 'text-gray-400'">Ciu</button>
+                <button @click="actualizarUbicacion('Ferreries')" class="flex-1 bg-gray-800 py-3 rounded-xl text-xs font-bold uppercase border border-gray-700 active:bg-blue-600 transition-colors" :class="miUbicacion === 'Ferreries' ? 'bg-blue-600 text-white' : 'text-gray-400'">Ferr</button>
+                <button @click="actualizarUbicacion('Alaior')" class="flex-1 bg-gray-800 py-3 rounded-xl text-xs font-bold uppercase border border-gray-700 active:bg-blue-600 transition-colors" :class="miUbicacion === 'Alaior' ? 'bg-blue-600 text-white' : 'text-gray-400'">Alaior</button>
+                <button @click="actualizarUbicacion('Maó')" class="flex-1 bg-gray-800 py-3 rounded-xl text-xs font-bold uppercase border border-gray-700 active:bg-blue-600 transition-colors" :class="miUbicacion === 'Maó' ? 'bg-blue-600 text-white' : 'text-gray-400'">Maó</button>
+            </div>
+
+            <!-- CONTADOR DE PASAJEROS -->
+            <div class="flex items-center justify-between w-full mb-8 bg-gray-900 p-2 rounded-full border border-gray-800">
+                <button @click="cambiarPasajeros(-1)" class="w-16 h-16 rounded-full bg-gray-800 text-3xl flex items-center justify-center active:bg-red-500 transition-colors text-white shadow-md">-</button>
+                <div class="text-center flex-1">
+                    <p class="text-[10px] uppercase text-gray-500 font-black tracking-widest">Mis Pasajeros</p>
+                    <p class="text-5xl font-black text-yellow-500" x-text="miPax"></p>
+                </div>
+                <button @click="cambiarPasajeros(1)" class="w-16 h-16 rounded-full bg-gray-800 text-3xl flex items-center justify-center active:bg-green-500 transition-colors text-white shadow-md">+</button>
+            </div>
+
+            <!-- BOTÓN PTT (WALKIE TALKIE) -->
+            <div class="relative flex flex-col items-center">
+                <!-- Se usa touchstart/touchend en móviles y mousedown/mouseup en PC -->
+                <button id="btn-ptt"
+                    @mousedown="empezarGrabar()" @mouseup="pararGrabar()" @mouseleave="pararGrabarSiSale()"
+                    @touchstart.prevent="empezarGrabar()" @touchend.prevent="pararGrabar()"
+                    class="w-32 h-32 rounded-full bg-yellow-500 flex flex-col items-center justify-center shadow-[0_0_30px_rgba(234,179,8,0.2)] transition-all duration-150"
+                    :class="{ 'ptt-active': estadoRadio === 'grabando', 'ptt-receiving': estadoRadio === 'recibiendo' }">
+                    
+                    <i class="fas text-4xl mb-1 text-black" 
+                       :class="estadoRadio === 'recibiendo' ? 'fa-volume-up' : 'fa-microphone'"></i>
+                    <span class="text-black font-black text-[11px] tracking-widest" 
+                          x-text="estadoRadio === 'grabando' ? 'HABLANDO' : (estadoRadio === 'recibiendo' ? 'ESCUCHANDO' : 'PULSA Y HABLA')"></span>
+                </button>
+            </div>
+            
+        </div>
+    </footer>
+
+    <script>
+        // TUS CLAVES REALES DE FIREBASE
+        const firebaseConfig = {
+            apiKey: "AIzaSyC7b6_T0ze2HgXiYHfvUeL12JSXE7ZKogc",
+            authDomain: "misturnos-fe3ea.firebaseapp.com",
+            databaseURL: "https://misturnos-fe3ea-default-rtdb.europe-west1.firebasedatabase.app",
+            projectId: "misturnos-fe3ea",
+            storageBucket: "misturnos-fe3ea.firebasestorage.app",
+            messagingSenderId: "1029095925443",
+            appId: "1:1029095925443:web:873240d85ac5160f392476"
+        };
+
+        firebase.initializeApp(firebaseConfig);
+        const db = firebase.firestore();
+        const auth = firebase.auth();
+
+        function busTalkApp() {
+            return {
+                sesionIniciada: false, conectado: false,
+                miBusInput: '', miBus: '', miPax: 0, miUbicacion: 'En Base',
+                compañeros:[],
+                
+                // Sistema de Walkie-Talkie
+                estadoRadio: 'reposo', // 'grabando', 'recibiendo', 'reposo'
+                elQueHabla: null,
+                mediaRecorder: null, chunks:[], streamingMsgId: null,
+
+                init() {
+                    const busGuardado = localStorage.getItem('bustalk_bus');
+                    if (busGuardado) {
+                        this.miBusInput = busGuardado;
+                        this.iniciarTurno();
+                    }
+                },
+
+                iniciarTurno() {
+                    if (!this.miBusInput || this.miBusInput <= 0) { alert("Pon tu número de bus."); return; }
+                    this.miBus = this.miBusInput.toString();
+                    localStorage.setItem('bustalk_bus', this.miBus);
+                    this.sesionIniciada = true;
+
+                    // 1. Iniciar sesión anónima en Firebase para permisos
+                    auth.signInAnonymously().then(() => {
+                        this.conectado = true;
+                        
+                        // 2. Reportar mi estado a la base de datos
+                        this.actualizarMiEstadoBD();
+
+                        // 3. Escuchar al resto de compañeros (Radar)
+                        db.collection("bustalk_buses").onSnapshot(snap => {
+                            const lista =[];
+                            snap.forEach(doc => {
+                                if(doc.id !== this.miBus) {
+                                    // Limpiar buses que llevan más de 12 horas sin actualizar
+                                    const data = doc.data();
+                                    const hace12h = Date.now() - (12 * 60 * 60 * 1000);
+                                    if(data.timestamp > hace12h) {
+                                        lista.push({ id: doc.id, ...data });
+                                    }
+                                }
+                            });
+                            this.compañeros = lista.sort((a,b) => b.pax - a.pax);
+                        });
+
+                        // 4. ESCUCHAR LA FRECUENCIA DE RADIO (Walkie-Talkie)
+                        db.collection("bustalk_radio").orderBy("timestamp", "desc").limit(1)
+                            .onSnapshot(snap => {
+                                if(snap.empty) return;
+                                const msg = snap.docs[0].data();
+                                const msgId = snap.docs[0].id;
+                                
+                                // Si es un mensaje nuevo y no es mío, ¡LO REPRODUCIMOS!
+                                if (msg.bus !== this.miBus && this.streamingMsgId !== msgId) {
+                                    this.streamingMsgId = msgId;
+                                    this.reproducirAudio(msg.audioBase64, msg.bus);
+                                }
+                            });
+                            
+                        // Pido permiso de micrófono nada más entrar
+                        navigator.mediaDevices.getUserMedia({ audio: true }).catch(e => console.log("Mic no autorizado aún"));
+
+                    }).catch(() => { this.conectado = false; alert("Error de red"); });
+                },
+
+                cerrarTurno() {
+                    if(confirm("¿Quieres apagar la radio y salir del turno?")) {
+                        db.collection("bustalk_buses").doc(this.miBus).delete();
+                        localStorage.removeItem('bustalk_bus');
+                        location.reload();
+                    }
+                },
+
+                cambiarPasajeros(valor) {
+                    this.miPax = Math.max(0, this.miPax + valor);
+                    this.actualizarMiEstadoBD();
+                },
+
+                actualizarUbicacion(lugar) {
+                    this.miUbicacion = lugar;
+                    this.actualizarMiEstadoBD();
+                    if ("vibrate" in navigator) navigator.vibrate(50);
+                },
+
+                actualizarMiEstadoBD() {
+                    if(!this.conectado) return;
+                    db.collection("bustalk_buses").doc(this.miBus).set({
+                        pax: this.miPax,
+                        ubicacion: this.miUbicacion,
+                        timestamp: Date.now()
+                    });
+                },
+
+                // ==========================================
+                // LÓGICA DEL WALKIE-TALKIE
+                // ==========================================
+                empezarGrabar() {
+                    if (this.estadoRadio !== 'reposo') return; 
+                    
+                    navigator.mediaDevices.getUserMedia({ audio: true }).then(stream => {
+                        this.estadoRadio = 'grabando';
+                        if ("vibrate" in navigator) navigator.vibrate(100); 
+
+                        this.chunks =[];
+                        this.mediaRecorder = new MediaRecorder(stream);
+                        
+                        this.mediaRecorder.ondataavailable = e => {
+                            this.chunks.push(e.data);
+                        };
+
+                        this.mediaRecorder.onstop = async () => {
+                            // Cuando se suelta el botón, unimos el audio y lo subimos
+                            const audioBlob = new Blob(this.chunks, { type: 'audio/webm' });
+                            const base64Audio = await this.blobToBase64(audioBlob);
+
+                            // Guardamos en Firebase para que los demás lo oigan
+                            db.collection("bustalk_radio").add({
+                                bus: this.miBus,
+                                audioBase64: base64Audio,
+                                timestamp: firebase.firestore.FieldValue.serverTimestamp()
+                            });
+                            
+                            // Apagamos el micro para ahorrar batería
+                            stream.getTracks().forEach(track => track.stop());
+                        };
+
+                        this.mediaRecorder.start();
+                    }).catch(err => {
+                        alert("Activa los permisos de micrófono para hablar.");
+                    });
+                },
+
+                pararGrabar() {
+                    if (this.estadoRadio === 'grabando' && this.mediaRecorder) {
+                        this.mediaRecorder.stop();
+                        this.estadoRadio = 'reposo';
+                    }
+                },
+
+                pararGrabarSiSale() {
+                    // Si el dedo se resbala fuera del botón, cortamos la grabación
+                    this.pararGrabar();
+                },
+
+                reproducirAudio(base64, busSender) {
+                    this.estadoRadio = 'recibiendo';
+                    this.elQueHabla = busSender;
+                    if ("vibrate" in navigator) navigator.vibrate([50, 100, 50]); // Vibra cuando entra un mensaje
+                    
+                    const audio = new Audio(base64);
+                    audio.play().catch(e => console.log("El navegador bloqueó el autoplay."));
+                    
+                    audio.onended = () => {
+                        this.estadoRadio = 'reposo';
+                        this.elQueHabla = null;
+                    };
+                },
+
+                blobToBase64(blob) {
+                    return new Promise((resolve, reject) => {
+                        const reader = new FileReader();
+                        reader.readAsDataURL(blob);
+                        reader.onloadend = () => resolve(reader.result);
+                        reader.onerror = reject;
+                    });
+                }
+            }
+        }
+    </script>
+</body>
+</html>
